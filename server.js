@@ -14,6 +14,11 @@ const PANEL_PASSWORD = process.env.PANEL_PASSWORD || 'frp2026';
 const CONFD_DIR = path.join(__dirname, 'conf.d');
 const FRPC_MAIN = path.join(__dirname, 'frpc.toml');
 
+// frps Admin API
+const FRPS_ADMIN_URL = process.env.FRPS_ADMIN_URL || 'https://127.0.0.1:7500';
+const FRPS_ADMIN_USER = process.env.FRPS_ADMIN_USER || 'admin';
+const FRPS_ADMIN_PASS = process.env.FRPS_ADMIN_PASS || '';
+
 // 可用域名（從環境變數 DOMAINS 讀取，逗號分隔）
 const DOMAINS = process.env.DOMAINS
   ? process.env.DOMAINS.split(',').map(d => d.trim())
@@ -44,6 +49,19 @@ app.post('/api/login', (req, res) => {
 
 app.use('/api', requireAuth);
 
+// --- Helper: 查詢 frps Admin API ---
+async function fetchFrpsApi(endpoint) {
+  const url = `${FRPS_ADMIN_URL}${endpoint}`;
+  const auth = Buffer.from(`${FRPS_ADMIN_USER}:${FRPS_ADMIN_PASS}`).toString('base64');
+  const res = await fetch(url, {
+    headers: { 'Authorization': `Basic ${auth}` },
+    // frps 可能使用自簽憑證
+    ...(url.startsWith('https') ? { dispatcher: undefined } : {}),
+  });
+  if (!res.ok) throw new Error(`frps API ${endpoint} returned ${res.status}`);
+  return res.json();
+}
+
 // --- API ---
 
 // 取得可用域名列表
@@ -51,7 +69,27 @@ app.get('/api/domains', (_req, res) => {
   res.json(DOMAINS);
 });
 
-// 列出所有 proxy
+// 取得 frps 上所有 proxy（從 Admin API）
+app.get('/api/all-proxies', async (_req, res) => {
+  try {
+    const [httpData, tcpData, udpData] = await Promise.all([
+      fetchFrpsApi('/api/proxy/http').catch(() => ({ proxies: [] })),
+      fetchFrpsApi('/api/proxy/tcp').catch(() => ({ proxies: [] })),
+      fetchFrpsApi('/api/proxy/udp').catch(() => ({ proxies: [] })),
+    ]);
+    const proxies = [
+      ...(httpData.proxies || []).map(p => ({ ...p, _type: 'http' })),
+      ...(tcpData.proxies || []).map(p => ({ ...p, _type: 'tcp' })),
+      ...(udpData.proxies || []).map(p => ({ ...p, _type: 'udp' })),
+    ];
+    res.json(proxies);
+  } catch (err) {
+    console.error('[frps API] 查詢失敗:', err.message);
+    res.status(502).json({ error: '無法連線 frps Admin API' });
+  }
+});
+
+// 列出本面板管理的 proxy（conf.d/）
 app.get('/api/proxies', (_req, res) => {
   const files = fs.readdirSync(CONFD_DIR).filter(f => f.endsWith('.toml'));
   const proxies = files.map(f => {
@@ -84,8 +122,12 @@ app.post('/api/proxies', (req, res) => {
   toml += `localPort = ${parseInt(localPort, 10)}\n`;
 
   if (type === 'http' || type === 'https') {
-    const fullDomain = subdomain ? `${subdomain}.${domain}` : domain;
-    toml += `customDomains = ["${fullDomain}"]\n`;
+    if (subdomain) {
+      toml += `subdomain = "${subdomain}"\n`;
+    } else {
+      const fullDomain = domain || DOMAINS[0];
+      toml += `customDomains = ["${fullDomain}"]\n`;
+    }
   } else if (type === 'tcp' || type === 'udp') {
     if (remotePort) toml += `remotePort = ${parseInt(remotePort, 10)}\n`;
   }
@@ -122,8 +164,12 @@ app.post('/api/generate', (req, res) => {
   toml += `localPort = ${parseInt(localPort, 10)}\n`;
 
   if (type === 'http' || type === 'https') {
-    const fullDomain = subdomain ? `${subdomain}.${domain}` : domain;
-    toml += `customDomains = ["${fullDomain}"]\n`;
+    if (subdomain) {
+      toml += `subdomain = "${subdomain}"\n`;
+    } else {
+      const fullDomain = domain || DOMAINS[0];
+      toml += `customDomains = ["${fullDomain}"]\n`;
+    }
   } else if (type === 'tcp' || type === 'udp') {
     if (remotePort) toml += `remotePort = ${parseInt(remotePort, 10)}\n`;
   }
@@ -157,7 +203,7 @@ const HTML = `<!DOCTYPE html>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f0f2f5; color: #333; }
-  .container { max-width: 800px; margin: 0 auto; padding: 20px; }
+  .container { max-width: 960px; margin: 0 auto; padding: 20px; }
   h1 { text-align: center; margin: 20px 0; color: #1a73e8; }
   .card { background: #fff; border-radius: 8px; padding: 24px; margin-bottom: 16px; box-shadow: 0 1px 3px rgba(0,0,0,.1); }
   .card h2 { margin-bottom: 16px; font-size: 18px; color: #555; }
@@ -168,14 +214,14 @@ const HTML = `<!DOCTYPE html>
   button { padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; font-weight: 500; }
   .btn-primary { background: #1a73e8; color: #fff; }
   .btn-primary:hover { background: #1557b0; }
-  .btn-danger { background: #ea4335; color: #fff; }
+  .btn-danger { background: #ea4335; color: #fff; font-size: 12px; padding: 6px 12px; }
   .btn-danger:hover { background: #c5221f; }
   .btn-secondary { background: #34a853; color: #fff; }
   .btn-secondary:hover { background: #2d8e47; }
   .actions { display: flex; gap: 8px; margin-top: 8px; }
   table { width: 100%; border-collapse: collapse; }
-  th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid #eee; font-size: 14px; }
-  th { color: #666; font-weight: 500; }
+  th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid #eee; font-size: 13px; }
+  th { color: #666; font-weight: 500; background: #fafafa; }
   .toast { position: fixed; top: 20px; right: 20px; padding: 12px 20px; border-radius: 4px; color: #fff; font-size: 14px; z-index: 999; display: none; }
   .toast.ok { background: #34a853; }
   .toast.err { background: #ea4335; }
@@ -184,6 +230,22 @@ const HTML = `<!DOCTYPE html>
   #app { display: none; }
   .domain-preview { background: #e8f0fe; padding: 6px 12px; border-radius: 4px; margin-bottom: 12px; font-size: 14px; color: #1a73e8; }
   .hidden { display: none; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+  .badge-online { background: #e6f4ea; color: #1e8e3e; }
+  .badge-offline { background: #fce8e6; color: #c5221f; }
+  .badge-http { background: #e8f0fe; color: #1a73e8; }
+  .badge-tcp { background: #fef7e0; color: #b06000; }
+  .badge-udp { background: #f3e8fd; color: #7627bb; }
+  .traffic { font-size: 11px; color: #888; }
+  .subdomain-link { color: #1a73e8; text-decoration: none; }
+  .subdomain-link:hover { text-decoration: underline; }
+  .tab-bar { display: flex; gap: 0; margin-bottom: 16px; border-bottom: 2px solid #eee; }
+  .tab-bar button { background: none; border: none; padding: 10px 20px; font-size: 14px; font-weight: 500; color: #666; cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -2px; }
+  .tab-bar button.active { color: #1a73e8; border-bottom-color: #1a73e8; }
+  .stats { display: flex; gap: 16px; margin-bottom: 16px; }
+  .stat-box { background: #f8f9fa; border-radius: 8px; padding: 12px 16px; flex: 1; text-align: center; }
+  .stat-box .num { font-size: 24px; font-weight: 700; color: #1a73e8; }
+  .stat-box .label { font-size: 12px; color: #888; }
 </style>
 </head>
 <body>
@@ -204,8 +266,40 @@ const HTML = `<!DOCTYPE html>
 <div id="app" class="container">
   <h1>FRP Panel</h1>
 
+  <!-- 統計 -->
+  <div class="stats">
+    <div class="stat-box"><div class="num" id="stat-total">-</div><div class="label">全部隧道</div></div>
+    <div class="stat-box"><div class="num" id="stat-online">-</div><div class="label">上線中</div></div>
+    <div class="stat-box"><div class="num" id="stat-offline">-</div><div class="label">離線</div></div>
+  </div>
+
+  <!-- Tab 切換 -->
+  <div class="tab-bar">
+    <button class="active" onclick="switchTab('all', this)">所有隧道</button>
+    <button onclick="switchTab('managed', this)">本面板管理</button>
+    <button onclick="switchTab('add', this)">新增隧道</button>
+  </div>
+
+  <!-- 所有隧道 -->
+  <div id="tab-all" class="card">
+    <h2>frps 上所有註冊的隧道</h2>
+    <table>
+      <thead><tr><th>名稱</th><th>類型</th><th>域名 / Port</th><th>狀態</th><th>今日流量</th><th>連線</th></tr></thead>
+      <tbody id="all-proxy-list"></tbody>
+    </table>
+  </div>
+
+  <!-- 本面板管理 -->
+  <div id="tab-managed" class="card" style="display:none">
+    <h2>由本面板管理的隧道（conf.d/）</h2>
+    <table>
+      <thead><tr><th>名稱</th><th>設定</th><th>操作</th></tr></thead>
+      <tbody id="proxy-list"></tbody>
+    </table>
+  </div>
+
   <!-- 新增隧道 -->
-  <div class="card">
+  <div id="tab-add" class="card" style="display:none">
     <h2>新增隧道</h2>
     <div class="row">
       <div>
@@ -259,15 +353,6 @@ const HTML = `<!DOCTYPE html>
       <button class="btn-secondary" onclick="addProxy('download')">下載 frpc.toml（遠端用）</button>
     </div>
   </div>
-
-  <!-- 現有隧道列表 -->
-  <div class="card">
-    <h2>現有本機隧道</h2>
-    <table>
-      <thead><tr><th>名稱</th><th>設定</th><th>操作</th></tr></thead>
-      <tbody id="proxy-list"></tbody>
-    </table>
-  </div>
 </div>
 
 <script>
@@ -283,9 +368,93 @@ async function doLogin() {
     document.getElementById('login-screen').style.display = 'none';
     document.getElementById('app').style.display = 'block';
     loadDomains();
+    loadAllProxies();
     loadProxies();
   } else {
     toast('密碼錯誤', true);
+  }
+}
+
+// --- Tab 切換 ---
+function switchTab(name, btn) {
+  document.querySelectorAll('.tab-bar button').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  ['all', 'managed', 'add'].forEach(t => {
+    document.getElementById('tab-' + t).style.display = t === name ? '' : 'none';
+  });
+  if (name === 'all') loadAllProxies();
+  if (name === 'managed') loadProxies();
+}
+
+// --- 格式化流量 ---
+function fmtBytes(b) {
+  if (!b || b === 0) return '-';
+  if (b < 1024) return b + ' B';
+  if (b < 1048576) return (b / 1024).toFixed(1) + ' KB';
+  if (b < 1073741824) return (b / 1048576).toFixed(1) + ' MB';
+  return (b / 1073741824).toFixed(2) + ' GB';
+}
+
+// --- 載入所有 proxy（frps API）---
+async function loadAllProxies() {
+  try {
+    const r = await fetch('/api/all-proxies');
+    const proxies = await r.json();
+
+    // 統計
+    const online = proxies.filter(p => p.status === 'online').length;
+    document.getElementById('stat-total').textContent = proxies.length;
+    document.getElementById('stat-online').textContent = online;
+    document.getElementById('stat-offline').textContent = proxies.length - online;
+
+    // 排序：online 優先，再依名稱
+    proxies.sort((a, b) => {
+      if (a.status === 'online' && b.status !== 'online') return -1;
+      if (a.status !== 'online' && b.status === 'online') return 1;
+      return a.name.localeCompare(b.name);
+    });
+
+    const tbody = document.getElementById('all-proxy-list');
+    if (proxies.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#999">無法取得 frps 資料</td></tr>';
+      return;
+    }
+    tbody.innerHTML = proxies.map(p => {
+      const typeBadge = '<span class="badge badge-' + p._type + '">' + p._type.toUpperCase() + '</span>';
+      const statusBadge = '<span class="badge badge-' + p.status + '">' + (p.status === 'online' ? '上線' : '離線') + '</span>';
+
+      let target = '-';
+      if (p._type === 'http') {
+        const sub = p.conf?.subdomain;
+        const custom = p.conf?.customDomains;
+        if (sub) {
+          const domain = sub + '.digitalent.cc';
+          target = '<a class="subdomain-link" href="https://' + domain + '" target="_blank">' + domain + '</a>';
+        } else if (custom && custom.length) {
+          target = escHtml(custom.join(', '));
+        }
+      } else if (p._type === 'tcp' || p._type === 'udp') {
+        const rp = p.conf?.remotePort;
+        if (rp) target = ':' + rp;
+      }
+
+      const trafficIn = fmtBytes(p.todayTrafficIn);
+      const trafficOut = fmtBytes(p.todayTrafficOut);
+      const traffic = '<span class="traffic">&uarr;' + trafficOut + ' &darr;' + trafficIn + '</span>';
+
+      return '<tr>'
+        + '<td><strong>' + escHtml(p.name) + '</strong></td>'
+        + '<td>' + typeBadge + '</td>'
+        + '<td>' + target + '</td>'
+        + '<td>' + statusBadge + '</td>'
+        + '<td>' + traffic + '</td>'
+        + '<td>' + (p.curConns || 0) + '</td>'
+        + '</tr>';
+    }).join('');
+  } catch (err) {
+    console.error('loadAllProxies error:', err);
+    document.getElementById('all-proxy-list').innerHTML =
+      '<tr><td colspan="6" style="text-align:center;color:#c5221f">frps Admin API 連線失敗</td></tr>';
   }
 }
 
@@ -326,7 +495,6 @@ async function addProxy(mode) {
   if (!data.name || !data.localPort) return toast('請填寫名稱和本地 Port', true);
 
   if (mode === 'download') {
-    // 下載模式：用隱藏 form submit
     const form = document.createElement('form');
     form.method = 'POST';
     form.action = '/api/generate';
@@ -350,6 +518,7 @@ async function addProxy(mode) {
   if (r.ok) {
     toast('隧道已新增並 reload');
     loadProxies();
+    loadAllProxies();
     document.getElementById('f-name').value = '';
     document.getElementById('f-subdomain').value = '';
     document.getElementById('f-local-port').value = '';
@@ -358,28 +527,27 @@ async function addProxy(mode) {
   }
 }
 
-// --- 列出 proxy ---
+// --- 列出本面板管理的 proxy ---
 async function loadProxies() {
   const r = await fetch('/api/proxies');
   const proxies = await r.json();
   const tbody = document.getElementById('proxy-list');
   if (proxies.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="3" style="text-align:center;color:#999">尚無隧道</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="3" style="text-align:center;color:#999">尚無由本面板管理的隧道</td></tr>';
     return;
   }
   tbody.innerHTML = proxies.map(p => {
     const name = p.filename.replace('.toml', '');
-    const summary = p.content.replace(/\\n/g, ' ').substring(0, 80);
-    return '<tr><td><strong>' + name + '</strong></td>'
+    return '<tr><td><strong>' + escHtml(name) + '</strong></td>'
       + '<td><code style="font-size:12px;white-space:pre-wrap">' + escHtml(p.content.trim()) + '</code></td>'
-      + '<td><button class="btn-danger" onclick="delProxy(\\''+p.filename+'\\')">刪除</button></td></tr>';
+      + '<td><button class="btn-danger" onclick="delProxy(\\'' + p.filename + '\\')">刪除</button></td></tr>';
   }).join('');
 }
 
 async function delProxy(filename) {
   if (!confirm('確定要刪除 ' + filename + '？')) return;
   const r = await fetch('/api/proxies/' + encodeURIComponent(filename), { method: 'DELETE' });
-  if (r.ok) { toast('已刪除'); loadProxies(); }
+  if (r.ok) { toast('已刪除'); loadProxies(); loadAllProxies(); }
   else toast('刪除失敗', true);
 }
 
@@ -397,5 +565,5 @@ function toast(msg, isErr) {
 </html>`;
 
 app.listen(PORT, () => {
-  console.log(`FRP Panel 啟動於 http://localhost:${PORT}`);
+  console.log('FRP Panel 啟動於 http://localhost:' + PORT);
 });
