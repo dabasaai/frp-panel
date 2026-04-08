@@ -1,0 +1,17 @@
+# frpc 主設定檔 — FRP Panel 本機用
+# 複製為 frpc.toml 並填入實際的 server 資訊
+
+serverAddr = "your_server_ip"
+serverPort = 7000
+auth.method = "token"
+auth.token = "your_frps_auth_token"
+
+log.to = "console"
+log.level = "info"
+
+# 啟用 webServer 供 frpc reload 使用
+webServer.addr = "127.0.0.1"
+webServer.port = 7400
+
+# 載入 conf.d/ 內所有 proxy 設定
+includes = ["./conf.d/*.toml"]

@@ -1,0 +1,4 @@
+node_modules/
+.env
+conf.d/
+frpc.toml

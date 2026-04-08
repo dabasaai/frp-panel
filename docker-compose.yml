@@ -1,0 +1,18 @@
+services:
+  frp-panel:
+    build: .
+    container_name: frp-panel
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./conf.d:/app/conf.d
+      - ./frpc.toml:/app/frpc.toml:ro
+    env_file:
+      - .env
+    networks:
+      - proxy
+
+networks:
+  proxy:
+    external: true
