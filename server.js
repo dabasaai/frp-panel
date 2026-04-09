@@ -428,7 +428,7 @@ async function loadAllProxies() {
         const sub = p.conf?.subdomain;
         const custom = p.conf?.customDomains;
         if (sub) {
-          const domain = sub + '.gsct.tw';
+          const domain = sub + '.' + (DOMAINS[0] || 'example.com');
           target = '<a class="subdomain-link" href="https://' + domain + '" target="_blank">' + domain + '</a>';
         } else if (custom && custom.length) {
           target = escHtml(custom.join(', '));
