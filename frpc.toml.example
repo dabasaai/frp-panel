@@ -1,10 +1,10 @@
-# frpc 主設定檔 — FRP Panel 本機用
-# 複製為 frpc.toml 並填入實際的 server 資訊
+# frpc 主設定檔 — FRP Panel 用
+# 複製為 frpc.toml 後由 setup.sh 自動填入
 
-serverAddr = "your_server_ip"
+serverAddr = "gsct.tw"
 serverPort = 7000
 auth.method = "token"
-auth.token = "your_frps_auth_token"
+auth.token = "77890a0978d7f965982d20de2f7d3fc2"
 
 log.to = "console"
 log.level = "info"
