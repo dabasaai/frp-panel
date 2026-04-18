@@ -110,6 +110,12 @@ app.post('/api/proxies', (req, res) => {
   if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
     return res.status(400).json({ error: '名稱僅允許英數、底線、連字號' });
   }
+  if ((type === 'tcp' || type === 'udp') && remotePort) {
+    const p = parseInt(remotePort, 10);
+    if (p < 60000 || p > 62999) {
+      return res.status(400).json({ error: '遠端 Port 必須在 60000–62999 範圍內' });
+    }
+  }
 
   const filename = `${name}.toml`;
   const filepath = path.join(CONFD_DIR, filename);
@@ -122,12 +128,8 @@ app.post('/api/proxies', (req, res) => {
   toml += `localPort = ${parseInt(localPort, 10)}\n`;
 
   if (type === 'http' || type === 'https') {
-    if (subdomain) {
-      toml += `subdomain = "${subdomain}"\n`;
-    } else {
-      const fullDomain = domain || DOMAINS[0];
-      toml += `customDomains = ["${fullDomain}"]\n`;
-    }
+    const fullDomain = subdomain ? `${subdomain}.${domain}` : (domain || DOMAINS[0]);
+    toml += `customDomains = ["${fullDomain}"]\n`;
   } else if (type === 'tcp' || type === 'udp') {
     if (remotePort) toml += `remotePort = ${parseInt(remotePort, 10)}\n`;
   }
@@ -164,12 +166,8 @@ app.post('/api/generate', (req, res) => {
   toml += `localPort = ${parseInt(localPort, 10)}\n`;
 
   if (type === 'http' || type === 'https') {
-    if (subdomain) {
-      toml += `subdomain = "${subdomain}"\n`;
-    } else {
-      const fullDomain = domain || DOMAINS[0];
-      toml += `customDomains = ["${fullDomain}"]\n`;
-    }
+    const fullDomain = subdomain ? `${subdomain}.${domain}` : (domain || DOMAINS[0]);
+    toml += `customDomains = ["${fullDomain}"]\n`;
   } else if (type === 'tcp' || type === 'udp') {
     if (remotePort) toml += `remotePort = ${parseInt(remotePort, 10)}\n`;
   }
@@ -229,6 +227,8 @@ const HTML = `<!DOCTYPE html>
   #login-screen .card { width: 340px; }
   #app { display: none; }
   .domain-preview { background: #e8f0fe; padding: 6px 12px; border-radius: 4px; margin-bottom: 12px; font-size: 14px; color: #1a73e8; }
+  .port-info { background: #fff4e5; border-left: 3px solid #ff9800; padding: 10px 14px; border-radius: 4px; margin-bottom: 16px; font-size: 13px; color: #555; }
+  .port-hint { font-size: 12px; color: #ff9800; margin-top: -8px; margin-bottom: 12px; }
   .hidden { display: none; }
   .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
   .badge-online { background: #e6f4ea; color: #1e8e3e; }
@@ -283,6 +283,7 @@ const HTML = `<!DOCTYPE html>
   <!-- 所有隧道 -->
   <div id="tab-all" class="card">
     <h2>frps 上所有註冊的隧道</h2>
+    <div class="port-info">🔌 TCP/UDP 可使用 Port 範圍：<strong>60000 – 62999</strong>（已開放 iptables，專供 frp 隧道使用）</div>
     <table>
       <thead><tr><th>名稱</th><th>類型</th><th>域名 / Port</th><th>狀態</th><th>今日流量</th><th>連線</th></tr></thead>
       <tbody id="all-proxy-list"></tbody>
@@ -301,6 +302,7 @@ const HTML = `<!DOCTYPE html>
   <!-- 新增隧道 -->
   <div id="tab-add" class="card" style="display:none">
     <h2>新增隧道</h2>
+    <div class="port-info">🔌 TCP/UDP 可使用 Port 範圍：<strong>60000 – 62999</strong>（已開放 iptables，專供 frp 隧道使用）</div>
     <div class="row">
       <div>
         <label>Proxy 名稱</label>
@@ -334,7 +336,8 @@ const HTML = `<!DOCTYPE html>
     <!-- TCP/UDP 欄位 -->
     <div id="tcp-fields" class="hidden">
       <label>遠端 Port（frps 上對外的 port）</label>
-      <input id="f-remote-port" type="number" placeholder="6000">
+      <input id="f-remote-port" type="number" placeholder="60000" min="60000" max="62999">
+      <div class="port-hint">💡 可使用範圍：<strong>60000 – 62999</strong>（其他 port 未開放 iptables）</div>
     </div>
 
     <div class="row">
