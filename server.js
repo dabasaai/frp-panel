@@ -3,6 +3,8 @@ const express = require('express');
 const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
+const http = require('http');
+const https = require('https');
 
 const app = express();
 app.use(express.json());
@@ -151,16 +153,32 @@ app.get('/api/me', (req, res) => {
 });
 
 // --- Helper: 查詢 frps Admin API ---
-async function fetchFrpsApi(endpoint) {
-  const url = `${FRPS_ADMIN_URL}${endpoint}`;
-  const auth = Buffer.from(`${FRPS_ADMIN_USER}:${FRPS_ADMIN_PASS}`).toString('base64');
-  const res = await fetch(url, {
-    headers: { 'Authorization': `Basic ${auth}` },
-    // frps 可能使用自簽憑證
-    ...(url.startsWith('https') ? { dispatcher: undefined } : {}),
+// 用內建 http/https 模組；frps admin 走 loopback 上的 TLS，憑證（digitalent.cc SAN）
+// 不含 127.0.0.1，故 https 時關閉憑證驗證——僅限本機 admin API，安全。
+function fetchFrpsApi(endpoint) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(`${FRPS_ADMIN_URL}${endpoint}`);
+    const lib = url.protocol === 'https:' ? https : http;
+    const auth = Buffer.from(`${FRPS_ADMIN_USER}:${FRPS_ADMIN_PASS}`).toString('base64');
+    const req = lib.request(url, {
+      method: 'GET',
+      headers: { Authorization: `Basic ${auth}` },
+      rejectUnauthorized: false, // 僅對本機 frps admin 自簽/不符 SAN 的憑證
+      timeout: 8000,
+    }, (res) => {
+      let body = '';
+      res.on('data', (c) => (body += c));
+      res.on('end', () => {
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          return reject(new Error(`frps API ${endpoint} returned ${res.statusCode}`));
+        }
+        try { resolve(JSON.parse(body)); } catch (e) { reject(e); }
+      });
+    });
+    req.on('error', reject);
+    req.on('timeout', () => req.destroy(new Error(`frps API ${endpoint} 連線逾時`)));
+    req.end();
   });
-  if (!res.ok) throw new Error(`frps API ${endpoint} returned ${res.status}`);
-  return res.json();
 }
 
 // --- API ---
