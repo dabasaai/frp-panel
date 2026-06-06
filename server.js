@@ -24,20 +24,92 @@ const DOMAINS = process.env.DOMAINS
   ? process.env.DOMAINS.split(',').map(d => d.trim())
   : ['example.com'];
 
+// --- Digitalent Auth Platform（SSO 統一認證）---
+const AUTH_SERVER = (process.env.AUTH_SERVER || 'https://auth.digitalent.cc').replace(/\/$/, '');
+// 用來在 /auth/apps 清單中辨識「本面板」的 app 條目（以 host 比對）。
+// 設定後：使用者要在 auth 平台後台看得到此 app 才放行（群組授權由後台管理）。
+// 留空：任何通過 SSO 的使用者皆可進。
+const AUTH_APP_URL = process.env.AUTH_APP_URL || '';
+
 // 確保 conf.d 存在
 if (!fs.existsSync(CONFD_DIR)) fs.mkdirSync(CONFD_DIR, { recursive: true });
 
-// --- 簡易 session 認證 ---
-const sessions = new Set();
+// --- 認證 ---
+// 主要：Digitalent SSO（前端拿 Bearer token，後端經 /auth/me 內省驗證）
+// 後門：PANEL_PASSWORD + 記憶體 session（auth platform 故障時的緊急通道）
 
-function requireAuth(req, res, next) {
+const sessions = new Set();          // 緊急密碼登入的 session id
+const meCache = new Map();           // token -> { exp, user }
+const appsCache = new Map();         // token -> { exp, ok }
+const AUTH_CACHE_TTL = 60 * 1000;    // 內省結果快取 60 秒，降低對 auth server 的請求
+
+function hostOf(u) {
+  try { return new URL(u).host; } catch { return ''; }
+}
+
+// 向 auth server 內省 token（/auth/me），回傳使用者物件或 null
+async function introspect(token) {
+  const cached = meCache.get(token);
+  if (cached && cached.exp > Date.now()) return cached.user;
+  try {
+    const r = await fetch(`${AUTH_SERVER}/auth/me`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!r.ok) { meCache.delete(token); return null; }
+    const user = await r.json();
+    meCache.set(token, { exp: Date.now() + AUTH_CACHE_TTL, user });
+    return user;
+  } catch (err) {
+    console.error('[auth] /auth/me 連線失敗:', err.message);
+    return null;
+  }
+}
+
+// App Launcher 授權：使用者在 auth 平台「看得到」本面板的 app 才放行。
+// 要不要限群組、限哪個群組，全在 auth 平台後台改 app 的 group_name 決定。
+async function isAuthorized(token, user) {
+  if (!AUTH_APP_URL) return true;            // 未設＝任何登入者皆可
+  if (user && user.is_superadmin) return true;
+  const cached = appsCache.get(token);
+  if (cached && cached.exp > Date.now()) return cached.ok;
+  try {
+    const r = await fetch(`${AUTH_SERVER}/auth/apps`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!r.ok) return false;
+    const apps = await r.json();
+    const want = hostOf(AUTH_APP_URL);
+    const ok = Array.isArray(apps) && apps.some(a => hostOf(a.url) === want);
+    appsCache.set(token, { exp: Date.now() + AUTH_CACHE_TTL, ok });
+    return ok;
+  } catch (err) {
+    console.error('[auth] /auth/apps 連線失敗:', err.message);
+    return false;
+  }
+}
+
+async function requireAuth(req, res, next) {
+  if (req.path === '/api/login') return next();
+  // 後門：密碼 session cookie（完整存取）
   const sid = req.headers.cookie?.match(/sid=([^;]+)/)?.[1];
   if (sid && sessions.has(sid)) return next();
-  if (req.path === '/api/login') return next();
+  // 主要：SSO Bearer token
+  const token = req.headers.authorization?.match(/^Bearer\s+(.+)$/i)?.[1];
+  if (token) {
+    const user = await introspect(token);
+    if (!user) return res.status(401).json({ error: '登入已失效，請重新登入' });
+    if (!(await isAuthorized(token, user))) {
+      return res.status(403).json({ error: '你沒有存取此面板的權限' });
+    }
+    req.user = user;
+    return next();
+  }
   return res.status(401).json({ error: '未登入' });
 }
 
+// 緊急密碼後門登入
 app.post('/api/login', (req, res) => {
+  if (!PANEL_PASSWORD) return res.status(403).json({ error: '密碼登入已停用' });
   if (req.body.password === PANEL_PASSWORD) {
     const sid = Math.random().toString(36).slice(2) + Date.now().toString(36);
     sessions.add(sid);
@@ -48,6 +120,11 @@ app.post('/api/login', (req, res) => {
 });
 
 app.use('/api', requireAuth);
+
+// 目前登入者（同源代理，避免瀏覽器跨網域打 auth server 觸發 CORS）
+app.get('/api/me', (req, res) => {
+  res.json(req.user || { name: '緊急密碼登入', backdoor: true });
+});
 
 // --- Helper: 查詢 frps Admin API ---
 async function fetchFrpsApi(endpoint) {
@@ -246,24 +323,36 @@ const HTML = `<!DOCTYPE html>
   .stat-box { background: #f8f9fa; border-radius: 8px; padding: 12px 16px; flex: 1; text-align: center; }
   .stat-box .num { font-size: 24px; font-weight: 700; color: #1a73e8; }
   .stat-box .label { font-size: 12px; color: #888; }
+  #user-bar { display: flex; justify-content: flex-end; align-items: center; gap: 12px; padding: 8px 0; font-size: 13px; color: #555; }
+  #user-bar .btn-danger { padding: 4px 10px; }
+  .sso-divider { text-align: center; margin: 12px 0; font-size: 12px; color: #aaa; }
 </style>
+<script src="${AUTH_SERVER}/sdk.js"></script>
 </head>
 <body>
 
 <div id="toast" class="toast"></div>
 
 <!-- 登入畫面 -->
-<div id="login-screen">
+<div id="login-screen" style="display:none">
   <div class="card">
     <h2>FRP Panel 登入</h2>
-    <label>密碼</label>
-    <input type="password" id="login-pw" placeholder="請輸入管理密碼" onkeydown="if(event.key==='Enter')doLogin()">
-    <button class="btn-primary" onclick="doLogin()" style="width:100%">登入</button>
+    <div id="login-hint" style="display:none;background:#fff4e5;border-left:3px solid #ff9800;padding:8px 12px;border-radius:4px;margin-bottom:12px;font-size:13px;color:#a15c00"></div>
+    <button class="btn-primary" onclick="ssoLogin()" style="width:100%">使用 Digitalent SSO 登入</button>
+    <div class="sso-divider">
+      <a href="#" onclick="document.getElementById('pw-fallback').style.display='block';this.style.display='none';return false" style="color:#aaa">緊急密碼登入</a>
+    </div>
+    <div id="pw-fallback" style="display:none">
+      <label>管理密碼</label>
+      <input type="password" id="login-pw" placeholder="緊急後門密碼" onkeydown="if(event.key==='Enter')doLogin()">
+      <button class="btn-secondary" onclick="doLogin()" style="width:100%">密碼登入</button>
+    </div>
   </div>
 </div>
 
 <!-- 主畫面 -->
 <div id="app" class="container">
+  <div id="user-bar"></div>
   <h1>FRP Panel</h1>
 
   <!-- 統計 -->
@@ -359,7 +448,132 @@ const HTML = `<!DOCTYPE html>
 </div>
 
 <script>
-// --- 登入 ---
+// --- Digitalent SSO ---
+const AUTH_SERVER = '${AUTH_SERVER}';
+let ssoToken = null;   // SSO access token；緊急密碼登入時為 null（改用 cookie）
+
+// 統一 API 呼叫：自動帶上 SSO Bearer，token 過期時嘗試 refresh 一次
+async function apiFetch(url, opts = {}) {
+  const headers = { ...(opts.headers || {}) };
+  if (ssoToken) headers['Authorization'] = 'Bearer ' + ssoToken;
+  let r = await fetch(url, { ...opts, headers });
+  if (r.status === 401 && ssoToken && window.Digitalent) {
+    let ok = false;
+    try { ok = await Digitalent.auth.refresh(); } catch (e) { ok = false; }
+    if (ok) {
+      ssoToken = Digitalent.auth.getToken();
+      headers['Authorization'] = 'Bearer ' + ssoToken;
+      r = await fetch(url, { ...opts, headers });
+    } else {
+      // token 失效且無法 refresh（含跨網域 CORS）→ 重新走 SSO 登入
+      sessionStorage.removeItem('sso_redirecting');
+      Digitalent.auth.redirectToLogin(location.origin);
+    }
+  }
+  if (r.status === 403) toast('你沒有存取此面板的權限', true);
+  return r;
+}
+
+function enterApp(label) {
+  document.getElementById('login-screen').style.display = 'none';
+  document.getElementById('app').style.display = 'block';
+  const bar = document.getElementById('user-bar');
+  bar.innerHTML = '<span>' + escHtml(label) + '</span>' +
+    '<button class="btn-danger" onclick="doLogout()">登出</button>';
+  loadDomains();
+  loadAllProxies();
+  loadProxies();
+}
+
+function showLoginScreen(msg) {
+  document.getElementById('login-screen').style.display = 'flex';
+  if (msg) {
+    const hint = document.getElementById('login-hint');
+    hint.textContent = msg;
+    hint.style.display = 'block';
+  }
+}
+
+// 頁面載入：預設自動導向 SSO；?backdoor 或自動導向失敗才顯示登入畫面
+async function initAuth() {
+  try {
+    if (!window.Digitalent) throw new Error('SSO SDK 未載入');
+    Digitalent.auth.init({ authServer: AUTH_SERVER });
+    const got = Digitalent.auth.handleRedirectCallback();   // 收 OAuth 導回的 token
+    if (got) sessionStorage.removeItem('sso_redirecting');
+
+    // 剛登出回來 → 停在登入頁，不要自動跳回 SSO
+    if (sessionStorage.getItem('just_logged_out')) {
+      sessionStorage.removeItem('just_logged_out');
+      try { Digitalent.auth.logout(); } catch (e) {}
+      ssoToken = null;
+      return showLoginScreen('已登出。');
+    }
+
+    if (Digitalent.auth.isAuthenticated()) {
+      ssoToken = Digitalent.auth.getToken();
+      // 用同源 /api/me（後端代驗），避免瀏覽器跨網域打 auth server 的 CORS 問題
+      const r = await fetch('/api/me', { headers: { Authorization: 'Bearer ' + ssoToken } });
+      if (r.ok) {
+        const user = await r.json();
+        sessionStorage.removeItem('sso_redirecting');
+        return enterApp(user.name || user.email || '已登入');
+      }
+      if (r.status === 403) {
+        ssoToken = null;
+        Digitalent.auth.logout();
+        return showLoginScreen('你的帳號沒有存取此面板的權限，請洽管理員開通。');
+      }
+      // 401：token 失效 → 清掉，往下走重新導向 SSO
+      ssoToken = null;
+      try { Digitalent.auth.logout(); } catch (e) {}
+    }
+
+    const wantBackdoor = /[?#&]backdoor\\b/.test(location.href);
+    if (wantBackdoor) {
+      showLoginScreen();
+      document.getElementById('pw-fallback').style.display = 'block';
+      return;
+    }
+
+    // 自動導向過一次仍回到這（沒拿到 token）→ 多半是白名單未設，停下來避免迴圈
+    if (sessionStorage.getItem('sso_redirecting')) {
+      sessionStorage.removeItem('sso_redirecting');
+      return showLoginScreen('SSO 登入未完成（auth 平台 redirect 白名單可能尚未加入本網址）。可改用緊急密碼登入。');
+    }
+
+    // 預設：自動導向 SSO（redirect 用乾淨的 origin，較好對白名單）
+    sessionStorage.setItem('sso_redirecting', '1');
+    Digitalent.auth.redirectToLogin(location.origin);
+  } catch (e) {
+    console.error('SSO init 失敗', e);
+    showLoginScreen('SSO 載入失敗：' + e.message + '，請改用緊急密碼登入。');
+  }
+}
+
+function ssoLogin() {
+  sessionStorage.removeItem('sso_redirecting');
+  if (window.Digitalent) Digitalent.auth.redirectToLogin(location.origin);
+  else toast('SSO 載入失敗，請改用密碼登入', true);
+}
+
+function doLogout() {
+  sessionStorage.removeItem('sso_redirecting');
+  if (ssoToken && window.Digitalent) {
+    try { Digitalent.auth.logout(); } catch (e) {}   // 清本地 token
+    ssoToken = null;
+    sessionStorage.setItem('just_logged_out', '1');
+    // 導去 auth server 清掉 SSO session，再帶回面板登入頁（否則會被無感登入回去）
+    location.assign(AUTH_SERVER + '/auth/logout?redirect=' + encodeURIComponent(location.origin));
+  } else {
+    document.cookie = 'sid=; Path=/; Max-Age=0';
+    location.reload();
+  }
+}
+
+window.addEventListener('DOMContentLoaded', initAuth);
+
+// --- 緊急密碼後門登入 ---
 async function doLogin() {
   const pw = document.getElementById('login-pw').value;
   const r = await fetch('/api/login', {
@@ -368,11 +582,8 @@ async function doLogin() {
     body: JSON.stringify({ password: pw })
   });
   if (r.ok) {
-    document.getElementById('login-screen').style.display = 'none';
-    document.getElementById('app').style.display = 'block';
-    loadDomains();
-    loadAllProxies();
-    loadProxies();
+    ssoToken = null;                 // 後門走 cookie
+    enterApp('緊急密碼登入');
   } else {
     toast('密碼錯誤', true);
   }
@@ -401,7 +612,7 @@ function fmtBytes(b) {
 // --- 載入所有 proxy（frps API）---
 async function loadAllProxies() {
   try {
-    const r = await fetch('/api/all-proxies');
+    const r = await apiFetch('/api/all-proxies');
     const proxies = await r.json();
 
     // 統計
@@ -463,7 +674,7 @@ async function loadAllProxies() {
 
 // --- 載入域名 ---
 async function loadDomains() {
-  const r = await fetch('/api/domains');
+  const r = await apiFetch('/api/domains');
   const domains = await r.json();
   const sel = document.getElementById('f-domain');
   sel.innerHTML = domains.map(d => '<option value="' + d + '">' + d + '</option>').join('');
@@ -498,21 +709,24 @@ async function addProxy(mode) {
   if (!data.name || !data.localPort) return toast('請填寫名稱和本地 Port', true);
 
   if (mode === 'download') {
-    const form = document.createElement('form');
-    form.method = 'POST';
-    form.action = '/api/generate';
-    for (const [k, v] of Object.entries(data)) {
-      const inp = document.createElement('input');
-      inp.type = 'hidden'; inp.name = k; inp.value = v;
-      form.appendChild(inp);
-    }
-    document.body.appendChild(form);
-    form.submit();
-    form.remove();
+    const r = await apiFetch('/api/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data)
+    });
+    if (!r.ok) return toast('產生設定檔失敗', true);
+    const blob = await r.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'frpc-' + data.name + '.toml';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(a.href);
     return;
   }
 
-  const r = await fetch('/api/proxies', {
+  const r = await apiFetch('/api/proxies', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data)
@@ -532,7 +746,7 @@ async function addProxy(mode) {
 
 // --- 列出本面板管理的 proxy ---
 async function loadProxies() {
-  const r = await fetch('/api/proxies');
+  const r = await apiFetch('/api/proxies');
   const proxies = await r.json();
   const tbody = document.getElementById('proxy-list');
   if (proxies.length === 0) {
@@ -549,7 +763,7 @@ async function loadProxies() {
 
 async function delProxy(filename) {
   if (!confirm('確定要刪除 ' + filename + '？')) return;
-  const r = await fetch('/api/proxies/' + encodeURIComponent(filename), { method: 'DELETE' });
+  const r = await apiFetch('/api/proxies/' + encodeURIComponent(filename), { method: 'DELETE' });
   if (r.ok) { toast('已刪除'); loadProxies(); loadAllProxies(); }
   else toast('刪除失敗', true);
 }
