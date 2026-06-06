@@ -30,6 +30,9 @@ const AUTH_SERVER = (process.env.AUTH_SERVER || 'https://auth.digitalent.cc').re
 // 設定後：使用者要在 auth 平台後台看得到此 app 才放行（群組授權由後台管理）。
 // 留空：任何通過 SSO 的使用者皆可進。
 const AUTH_APP_URL = process.env.AUTH_APP_URL || '';
+// 選填的細粒度分權：設定後，唯讀（GET）需該資源的 read 權限、寫入（POST/DELETE…）需 write。
+// 與 AUTH_APP_URL 正交：前者決定「能否進面板」，此者決定「能讀還是能寫」。留空＝不分權。
+const PANEL_RESOURCE = process.env.PANEL_RESOURCE || '';
 
 // 確保 conf.d 存在
 if (!fs.existsSync(CONFD_DIR)) fs.mkdirSync(CONFD_DIR, { recursive: true });
@@ -88,6 +91,20 @@ async function isAuthorized(token, user) {
   }
 }
 
+// 權限比對（對齊 auth 平台 SDK：支援 /path/* 萬用字元；superadmin 全通過）
+function resourceMatch(pattern, resource) {
+  if (pattern === resource) return true;
+  if (pattern.endsWith('*')) return resource.startsWith(pattern.replace(/\*$/, ''));
+  return false;
+}
+function hasPermission(user, action, resource) {
+  if (!user) return false;
+  if (user.is_superadmin) return true;
+  return (user.permissions || []).some(
+    p => resourceMatch(p.resource, resource) && (p.actions || []).includes(action)
+  );
+}
+
 async function requireAuth(req, res, next) {
   if (req.path === '/api/login') return next();
   // 後門：密碼 session cookie（完整存取）
@@ -100,6 +117,13 @@ async function requireAuth(req, res, next) {
     if (!user) return res.status(401).json({ error: '登入已失效，請重新登入' });
     if (!(await isAuthorized(token, user))) {
       return res.status(403).json({ error: '你沒有存取此面板的權限' });
+    }
+    // 選填的細粒度分權：讀取需 read、寫入需 write
+    if (PANEL_RESOURCE) {
+      const action = req.method === 'GET' ? 'read' : 'write';
+      if (!hasPermission(user, action, PANEL_RESOURCE)) {
+        return res.status(403).json({ error: `缺少權限 ${action}:${PANEL_RESOURCE}` });
+      }
     }
     req.user = user;
     return next();
