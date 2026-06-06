@@ -493,6 +493,7 @@ const HTML = `<!DOCTYPE html>
 // --- Digitalent SSO ---
 const AUTH_SERVER = '${AUTH_SERVER}';
 let ssoToken = null;   // SSO access token；緊急密碼登入時為 null（改用 cookie）
+let DOMAINS = [];      // 可用域名清單，由 loadDomains() 從 /api/domains 載入
 
 // 統一 API 呼叫：自動帶上 SSO Bearer，token 過期時嘗試 refresh 一次
 async function apiFetch(url, opts = {}) {
@@ -653,8 +654,15 @@ function fmtBytes(b) {
 
 // --- 載入所有 proxy（frps API）---
 async function loadAllProxies() {
+  const tbody0 = document.getElementById('all-proxy-list');
   try {
     const r = await apiFetch('/api/all-proxies');
+    if (!r.ok) {
+      let detail = '';
+      try { detail = (await r.json()).error || ''; } catch (e) {}
+      tbody0.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#c5221f">載入失敗（HTTP ' + r.status + '）' + (detail ? ' — ' + escHtml(detail) : '') + '</td></tr>';
+      return;
+    }
     const proxies = await r.json();
 
     // 統計
@@ -709,8 +717,8 @@ async function loadAllProxies() {
     }).join('');
   } catch (err) {
     console.error('loadAllProxies error:', err);
-    document.getElementById('all-proxy-list').innerHTML =
-      '<tr><td colspan="6" style="text-align:center;color:#c5221f">frps Admin API 連線失敗</td></tr>';
+    tbody0.innerHTML =
+      '<tr><td colspan="6" style="text-align:center;color:#c5221f">前端請求失敗：' + escHtml(err.message || String(err)) + '</td></tr>';
   }
 }
 
@@ -718,8 +726,9 @@ async function loadAllProxies() {
 async function loadDomains() {
   const r = await apiFetch('/api/domains');
   const domains = await r.json();
+  DOMAINS = Array.isArray(domains) ? domains : [];
   const sel = document.getElementById('f-domain');
-  sel.innerHTML = domains.map(d => '<option value="' + d + '">' + d + '</option>').join('');
+  sel.innerHTML = DOMAINS.map(d => '<option value="' + d + '">' + d + '</option>').join('');
   sel.addEventListener('change', updatePreview);
   updatePreview();
 }
