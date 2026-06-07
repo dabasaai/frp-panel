@@ -541,9 +541,16 @@ function showLoginScreen(msg) {
 async function initAuth() {
   try {
     if (!window.Digitalent) throw new Error('SSO SDK 未載入');
-    Digitalent.auth.init({ authServer: AUTH_SERVER });
+    const client = Digitalent.auth.init({ authServer: AUTH_SERVER });
     const got = Digitalent.auth.handleRedirectCallback();   // 收 OAuth 導回的 token
     if (got) sessionStorage.removeItem('sso_redirecting');
+
+    // 跟中央 SSO session 對帳（SDK 新增 syncSession）：
+    // 中央已登出 → 清掉本地殘留 token；中央換了帳號 → 採用中央核發的新 token。
+    // 修正「在別的 app 登出/換帳號後，這裡仍沿用舊帳號 token」。網路錯誤不阻擋。
+    try {
+      if (client && typeof client.syncSession === 'function') await client.syncSession();
+    } catch (e) { /* 沿用本地 token，不阻擋登入 */ }
 
     // 剛登出回來 → 停在登入頁，不要自動跳回 SSO
     if (sessionStorage.getItem('just_logged_out')) {
