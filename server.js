@@ -26,6 +26,25 @@ const DOMAINS = process.env.DOMAINS
   ? process.env.DOMAINS.split(',').map(d => d.trim())
   : ['example.com'];
 
+// frps 的 subdomainHost；frp 規定 customDomains 不可為其子網域，
+// 故目標落在此網域下時一律改用 subdomain 模式（否則 frps 拒絕註冊）。
+const FRP_SUBDOMAIN_HOST = process.env.FRP_SUBDOMAIN_HOST || 'digitalent.cc';
+
+// 產生 http/https proxy 的對外路由設定（subdomain 或 customDomains）
+function httpRoutingToml(subdomain, domain) {
+  let full = subdomain ? `${subdomain}.${domain}` : (domain || DOMAINS[0] || '');
+  // 落在 subdomainHost 之下 → 用 subdomain 模式（customDomains 會被 frps 拒絕）
+  if (full === FRP_SUBDOMAIN_HOST) {
+    // 目標就是裸網域本身，無 subdomain 可用，只能走 customDomains
+    return `customDomains = ["${full}"]\n`;
+  }
+  if (full.endsWith('.' + FRP_SUBDOMAIN_HOST)) {
+    const sub = full.slice(0, full.length - FRP_SUBDOMAIN_HOST.length - 1);
+    return `subdomain = "${sub}"\n`;
+  }
+  return `customDomains = ["${full}"]\n`;
+}
+
 // --- Digitalent Auth Platform（SSO 統一認證）---
 const AUTH_SERVER = (process.env.AUTH_SERVER || 'https://auth.digitalent.cc').replace(/\/$/, '');
 // 用來在 /auth/apps 清單中辨識「本面板」的 app 條目（以 host 比對）。
@@ -247,8 +266,7 @@ app.post('/api/proxies', (req, res) => {
   toml += `localPort = ${parseInt(localPort, 10)}\n`;
 
   if (type === 'http' || type === 'https') {
-    const fullDomain = subdomain ? `${subdomain}.${domain}` : (domain || DOMAINS[0]);
-    toml += `customDomains = ["${fullDomain}"]\n`;
+    toml += httpRoutingToml(subdomain, domain);
   } else if (type === 'tcp' || type === 'udp') {
     if (remotePort) toml += `remotePort = ${parseInt(remotePort, 10)}\n`;
   }
@@ -285,8 +303,7 @@ app.post('/api/generate', (req, res) => {
   toml += `localPort = ${parseInt(localPort, 10)}\n`;
 
   if (type === 'http' || type === 'https') {
-    const fullDomain = subdomain ? `${subdomain}.${domain}` : (domain || DOMAINS[0]);
-    toml += `customDomains = ["${fullDomain}"]\n`;
+    toml += httpRoutingToml(subdomain, domain);
   } else if (type === 'tcp' || type === 'udp') {
     if (remotePort) toml += `remotePort = ${parseInt(remotePort, 10)}\n`;
   }
